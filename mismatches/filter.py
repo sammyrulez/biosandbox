@@ -39,5 +39,5 @@ def file_mismatch(data_filename,query_filename,mismatch_n):
 def test_file_mismatch():
     data_txt = 'mismatches/tests/sample_data.txt'
     queries_txt = 'mismatches/tests/queries.txt'
-    file_mismatch(data_txt, queries_txt,1)
-    file_mismatch(data_txt, queries_txt,3)
+    for i in range(1,5):
+        file_mismatch(data_txt, queries_txt,i)
