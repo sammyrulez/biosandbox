@@ -15,74 +15,92 @@ def invert_strand( iv ):
       raise ValueError, "Illegal strand"
    return iv2
 
-def count_reads_in_features( sam_filename, gff_filename, stranded, 
+
+def init_count_data(counts, f, stranded,features):
+    if f.type == 'exon':
+        try:
+            feature_id = f.attr['gene_id'] + '_' + f.attr['exon_number']
+        except KeyError:
+            raise Exception("Feature %s does not contain a 'gene_id' or 'exon_number' attribute")
+        if stranded != "no" and f.iv.strand == ".":
+            raise Exception("Feature %s at %s does not have strand information but you are "
+                            "running htseq-count in stranded mode. Use '--stranded=no'." %
+                            ( f.name, f.iv ))
+        features[f.iv] += feature_id
+        counts[feature_id] = 0
+
+
+def read_gff_file(gff_filename, quiet, stranded):
+    features = HTSeq.GenomicArrayOfSets("auto", stranded != "no")
+    counts = {}
+    gff = HTSeq.GFF_Reader(gff_filename)
+    try:
+        i = 0
+        for f in gff:
+            init_count_data(counts, f, stranded, features)
+            i += 1
+            if i % 100000 == 0 and not quiet:
+                sys.stderr.write("%d GFF lines processed.\n" % i)
+    except:
+        sys.stderr.write("Error occured in %s.\n" % gff.get_line_number_string())
+        raise Exception()
+    if not quiet:
+        sys.stderr.write("%d GFF lines processed.\n" % i)
+    if len(counts) == 0 and not quiet:
+        sys.stderr.write("Warning: No features of type 'exon' found.\n")
+    return counts, features
+
+
+def check_sam_file(sam_filename):
+    if sam_filename != "-":
+        open(sam_filename).close()
+
+
+def read_pe_mode(sam_filename):
+    try:
+        if sam_filename != "-":
+            read_seq = HTSeq.SAM_Reader(sam_filename)
+            first_read = iter(read_seq).next()
+        else:
+            read_seq = iter(HTSeq.SAM_Reader(sys.stdin))
+            first_read = read_seq.next()
+            read_seq = itertools.chain([first_read], read_seq)
+        pe_mode = first_read.paired_end
+    except:
+        raise Exception("Error occured when reading first line of sam file.\n")
+    return pe_mode, read_seq
+
+
+def open_sam_output_file(samout):
+    if samout != "":
+        samoutfile = open(samout, "w")
+    else:
+        samoutfile = None
+
+    return samoutfile
+
+def write_to_samout(samoutfile ,  r, assignment, pe_mode ):
+    if samoutfile is None:
+        return
+    if not pe_mode:
+        r = (r,)
+    for read in r:
+        if read is not None:
+            samoutfile.write( read.original_sam_line.rstrip() +
+                              "\tXF:Z:" + assignment + "\n" )
+
+def count_reads_in_features( sam_filename, gff_filename, stranded,
       overlap_mode,  quiet, minaqual, samout ):
 
-   def write_to_samout( r, assignment ):
-      if samoutfile is None:
-         return
-      if not pe_mode:
-         r = (r,)
-      for read in r:
-         if read is not None:
-            samoutfile.write( read.original_sam_line.rstrip() + 
-               "\tXF:Z:" + assignment + "\n" )
-      
-   if quiet:
-      warnings.filterwarnings( action="ignore", module="HTSeq" ) 
-      
-   if samout != "":
-      samoutfile = open( samout, "w" )
-   else:
-      samoutfile = None
-      
-   features = HTSeq.GenomicArrayOfSets( "auto", stranded != "no" )     
-   counts = {}
+   warnings.filterwarnings( action="ignore", module="HTSeq" )
 
-   # Try to open samfile to fail early in case it is not there
-   if sam_filename != "-":
-      open( sam_filename ).close()
-      
-   gff = HTSeq.GFF_Reader( gff_filename )   
-   i = 0
-   try:
-      for f in gff:
-         if f.type == 'exon':
-            try:
-               feature_id = f.attr[ 'gene_id' ] + '_' +  f.attr[ 'exon_number' ]
-            except KeyError:
-               sys.exit( "Feature %s does not contain a 'gene_id' or 'exon_number' attribute" )
-            if stranded != "no" and f.iv.strand == ".":
-               sys.exit( "Feature %s at %s does not have strand information but you are "
-                  "running htseq-count in stranded mode. Use '--stranded=no'." % 
-                  ( f.name, f.iv ) )
-            features[ f.iv ] += feature_id
-            counts[ feature_id ] = 0
-         i += 1
-         if i % 100000 == 0 and not quiet:
-            sys.stderr.write( "%d GFF lines processed.\n" % i )
-   except:
-      sys.stderr.write( "Error occured in %s.\n" % gff.get_line_number_string() )
-      raise
-      
-   if not quiet:
-      sys.stderr.write( "%d GFF lines processed.\n" % i )
-      
-   if len( counts ) == 0 and not quiet:
-      sys.stderr.write( "Warning: No features of type '%s' found.\n" % feature_type )
-   
-   try:
-      if sam_filename != "-":
-         read_seq = HTSeq.SAM_Reader( sam_filename )
-         first_read = iter(read_seq).next()
-      else:
-         read_seq = iter( HTSeq.SAM_Reader( sys.stdin ) )
-         first_read = read_seq.next()
-         read_seq = itertools.chain( [ first_read ], read_seq )
-      pe_mode = first_read.paired_end
-   except:
-      sys.stderr.write( "Error occured when reading first line of sam file.\n" )
-      raise
+   samoutfile = open_sam_output_file(samout)
+
+   check_sam_file(sam_filename)
+
+   counts, features = read_gff_file(gff_filename, quiet, stranded)
+
+   pe_mode, read_seq = read_pe_mode(sam_filename)
 
    try:
       if pe_mode:
@@ -99,18 +117,18 @@ def count_reads_in_features( sam_filename, gff_filename, stranded,
          if not pe_mode:
             if not r.aligned:
                notaligned += 1
-               write_to_samout( r, "not_aligned" )
+               write_to_samout( samoutfile ,r, "not_aligned",pe_mode )
                continue
             try:
                if r.optional_field( "NH" ) > 1:
-                  write_to_samout( r, "alignment_not_unique" )
+                  write_to_samout( samoutfile ,r, "alignment_not_unique" ,pe_mode)
                   nonunique += 1
                   continue
             except KeyError:
                pass
             if r.aQual < minaqual:
                lowqual += 1
-               write_to_samout( r, "too_low_aQual" )
+               write_to_samout(samoutfile , r, "too_low_aQual",pe_mode )
                continue
             if stranded != "reverse":
                iv_seq = ( co.ref_iv for co in r.cigar if co.type == "M" )
@@ -133,20 +151,20 @@ def count_reads_in_features( sam_filename, gff_filename, stranded,
                      ( co.ref_iv for co in r[1].cigar if co.type == "M" ) )
             else:
                if ( r[0] is None ) or not ( r[0].aligned ):
-                  write_to_samout( r, "not_aligned" )
+                  write_to_samout( samoutfile, r, "not_aligned",pe_mode )
                   notaligned += 1
                   continue         
             try:
                if ( r[0] is not None and r[0].optional_field( "NH" ) > 1 ) or \
                      ( r[1] is not None and r[1].optional_field( "NH" ) > 1 ):
                   nonunique += 1
-                  write_to_samout( r, "alignment_not_unique" )
+                  write_to_samout(samoutfile, r, "alignment_not_unique",pe_mode )
                   continue
             except KeyError:
                pass
             if ( r[0] and r[0].aQual < minaqual ) or ( r[1] and r[1].aQual < minaqual ):
                lowqual += 1
-               write_to_samout( r, "too_low_aQual" )
+               write_to_samout(samoutfile, r, "too_low_aQual",pe_mode )
                continue        
          
          try:
@@ -171,14 +189,14 @@ def count_reads_in_features( sam_filename, gff_filename, stranded,
             else:
                sys.exit( "Illegal overlap mode." )
             if fs is None or len( fs ) == 0:
-               write_to_samout( r, "no_feature" )
+               write_to_samout( samoutfile,r, "no_feature" ,pe_mode)
                empty += 1
             elif len( fs ) > 1:
-               write_to_samout( r, "ambiguous[" + '+'.join( fs ) + "]" )
+               write_to_samout(samoutfile, r, "ambiguous[" + '+'.join( fs ) + "]",pe_mode )
                print  "ambiguous[" + '+'.join( fs ) + "]"
                ambiguous += 1
             else:
-               write_to_samout( r, list(fs)[0] )
+               write_to_samout( samoutfile, r, list(fs)[0] ,pe_mode )
                counts[ list(fs)[0] ] += 1
          except UnknownChrom:
             if not pe_mode:
